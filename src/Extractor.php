@@ -303,15 +303,8 @@ class Extractor {
 				continue;
 			}
 
-			$format = null;
-			if ($this->containsPhpFormat($message[self::SINGULAR])) {
-				$format = 'php-format';
-			} elseif (isset($message[self::PLURAL]) && $this->containsPhpFormat($message[self::PLURAL])) {
-				$format = 'php-format';
-			}
-
-			if (isset($format)) {
-				$message[self::FORMAT] = $format;
+			if ($this->containsPhpFormatting($message)) { 
+				$message[self::FORMAT] = 'php-format';
 			}
 
 			$line = $message[self::LINE];
@@ -327,7 +320,19 @@ class Extractor {
 		}
 	}
 
-	private function containsPhpFormat(string $string): bool {
+	private function containsPhpFormatting($message): bool {
+		if ($this->containsPhpFormattingPlaceholder($message[self::SINGULAR])) {
+			return true;
+		} 
+	
+		if (isset($message[self::PLURAL]) && $this->containsPhpFormattingPlaceholder($message[self::PLURAL])) {
+			return true;
+		}
+	
+		return false;
+	}
+
+	private function containsPhpFormattingPlaceholder(string $string): bool {
 		return 1 === preg_match('/%(?:\d+\$)?[dfsu]/', $string);
 	}
 
