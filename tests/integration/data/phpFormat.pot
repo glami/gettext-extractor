@@ -1,0 +1,41 @@
+# Gettext keys exported by GettextExtractor
+#, fuzzy
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2020-01-29T17:22:02+01:00\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: tests/integration/data/phpFormat.php:3
+#, php-format
+msgid "String with formatting %s"
+msgstr ""
+
+#: tests/integration/data/phpFormat.php:3
+msgid "String without formatting"
+msgstr ""
+
+#: tests/integration/data/phpFormat.php:3
+#, php-format
+msgid "Singular_1 %s"
+msgid_plural "Plural_1"
+msgstr[0] ""
+msgstr[1] ""
+
+#: tests/integration/data/phpFormat.php:3
+#, php-format
+msgid "Singular_2"
+msgid_plural "Plural_2 %d"
+msgstr[0] ""
+msgstr[1] ""
+
+#: tests/integration/data/phpFormat.php:3
+msgid "Singular_3"
+msgid_plural "Plural_3"
+msgstr[0] ""
+msgstr[1] ""

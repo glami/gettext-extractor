@@ -26,4 +26,15 @@ class ExtractorTest extends TestCase {
 		self::assertFileEquals(__DIR__.'/data/backslash.pot', $temp);
 		unlink($temp);
 	}
+
+	public function testPhpFormat(): void {
+		$this->object->scan('tests/integration/data/phpFormat.php');
+		$temp = tempnam(sys_get_temp_dir(), __CLASS__);
+		if ($temp === false) {
+			throw new \RuntimeException('Failed to create temporary file.');
+		}
+		$this->object->save($temp);
+		self::assertFileEquals(__DIR__.'/data/phpFormat.pot', $temp);
+		unlink($temp);
+	}
 }

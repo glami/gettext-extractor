@@ -23,6 +23,7 @@ class Extractor {
 	public const PLURAL = 'plural';
 	public const LINE = 'line';
 	public const FILE = 'file';
+	public const FORMAT = 'format'; 
 
 	/** @var string */
 	protected $logFile;
@@ -265,6 +266,9 @@ class Extractor {
 			foreach ($message['files'] as $file) {
 				$output[] = '#: '.$file[self::FILE].':'.$file[self::LINE];
 			}
+			if (isset($message[self::FORMAT])) {
+				$output[] = '#, ' . $message[self::FORMAT];
+			}
 			if (isset($message[self::CONTEXT])) {
 				$output[] = $this->formatMessage($message[self::CONTEXT], 'msgctxt');
 			}
@@ -298,6 +302,18 @@ class Extractor {
 			if ($key === chr(4).chr(4)) {
 				continue;
 			}
+
+			$format = null;
+			if ($this->containsPhpFormat($message[self::SINGULAR])) {
+				$format = 'php-format';
+			} elseif (isset($message[self::PLURAL]) && $this->containsPhpFormat($message[self::PLURAL])) {
+				$format = 'php-format';
+			}
+
+			if (isset($format)) {
+				$message[self::FORMAT] = $format;
+			}
+
 			$line = $message[self::LINE];
 			if (!isset($this->data[$key])) {
 				unset($message[self::LINE]);
@@ -309,6 +325,10 @@ class Extractor {
 				self::LINE => $line
 			);
 		}
+	}
+
+	private function containsPhpFormat(string $string): bool {
+		return 1 === preg_match('/%(?:\d+\$)?[dfsu]/', $string);
 	}
 
 	private function formatMessage(string $message, string $prefix = null): string {
