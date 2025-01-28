@@ -40,7 +40,7 @@ class LatteFilter extends AFilter implements IFilter {
 			return strlen($b) <=> strlen($a);
 		});
 
-		$phpParser = (new PhpParser\ParserFactory())->create(PhpParser\ParserFactory::PREFER_PHP7);
+		$phpParser = (new PhpParser\ParserFactory())->createForNewestSupportedVersion();
 		foreach ($tokens as $token) {
 			if ($token->type !== Latte\Token::MACRO_TAG) {
 				continue;
