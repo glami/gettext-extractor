@@ -12,7 +12,6 @@
 	},
 	"require": {
 		"php": ">=8.1",
-		"latte/latte": "^2.11",
 		"nette/utils": "^4.0",
 		"nikic/php-parser": "^5"
 	},
