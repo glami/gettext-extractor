@@ -44,7 +44,11 @@ class LatteFilter extends AFilter implements IFilter {
 				continue;
 			}
 			$value = $this->trimMacroValue($name, $token['value']);
-			$stmts = $phpParser->parse("<?php\nf($value);");
+			try {
+				$stmts = $phpParser->parse("<?php\nf($value);");
+			} catch (PhpParser\Error) {
+				continue;
+			}
 
 			if ($stmts === null) {
 				continue;
@@ -170,17 +174,9 @@ class LatteFilter extends AFilter implements IFilter {
 	}
 
 	private function trimMacroValue(string $name, string $value): string {
-		if (strpos($name, '!') === 0) {
-			// exclamation mark is never removed
-			return trim(substr($value, strlen($name)));
-		}
-
-		if (strpos($name, '_') === 0) {
-			// only underscore is removed
-			$offset = strlen(ltrim($name, '_'));
-			return substr($value, $offset);
-		}
-
-		return $value;
+		// Strip the full function name from the value so the parser receives
+		// only the arguments, e.g. {_p'ctx','text'} → 'ctx','text'
+		//                          {translate'text'} → 'text'
+		return trim(substr($value, strlen($name)));
 	}
 }
