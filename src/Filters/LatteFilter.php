@@ -8,12 +8,15 @@ declare(strict_types=1);
 
 namespace Vodacek\GettextExtractor\Filters;
 
+use Latte\CompileException;
+use Latte\Compiler\Nodes\Php\Expression\ArrayNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\TagParser;
+use Latte\Compiler\TemplateLexer;
+use Latte\Compiler\Token;
 use Nette\Utils\FileSystem;
-use PhpParser\Node\Expr\FuncCall;
-use PhpParser\Node\Scalar\String_;
-use PhpParser\Node\Stmt\Expression;
+use Throwable;
 use Vodacek\GettextExtractor\Extractor;
-use PhpParser;
 
 class LatteFilter extends AFilter implements IFilter {
 
@@ -30,153 +33,130 @@ class LatteFilter extends AFilter implements IFilter {
 
 	public function extract(string $file): array {
 		$data = [];
-
 		$functions = array_keys($this->functions);
-		usort($functions, static function(string $a, string $b) {
-			return strlen($b) <=> strlen($a);
-		});
 
-		$phpParser = (new PhpParser\ParserFactory())->createForNewestSupportedVersion();
+		$lexer = new TemplateLexer();
+		try {
+			$generator = $lexer->tokenize(FileSystem::read($file));
+		} catch (CompileException) {
+			return [];
+		}
 
-		foreach ($this->scanLatteTags(FileSystem::read($file)) as $token) {
-			$name = $this->findMacroName($token['text'], $functions);
-			if ($name === null) {
+		foreach ($generator as $token) {
+			if ($token->type !== Token::Latte_TagOpen) {
 				continue;
 			}
-			$value = $this->trimMacroValue($name, $token['value']);
+
+			$line = $token->position->line;
+			$tagOpenPosition = $token->position;
+
+			// Switch lexer into tag mode so it emits PHP-kind tokens for the content
+			$lexer->pushState(TemplateLexer::StateLatteTag);
+
+			$nameToken = null;
+			$phpTokens = [];
+
+			while ($generator->valid()) {
+				$tagToken = $generator->current();
+				if ($tagToken->type === Token::Latte_TagClose || $tagToken->type === Token::End) {
+					break; // do NOT advance — outer foreach will call next() with StatePlain restored
+				}
+				$generator->next();
+				if ($tagToken->type === Token::Latte_Name) {
+					$nameToken = $tagToken;
+				} elseif ($tagToken->isPhpKind()) {
+					$phpTokens[] = $tagToken;
+				}
+			}
+
+			$lexer->popState();
+
+			// Determine the actual function name.
+			// Latte 3's tag name regex only matches single `_` (not `_p`, `_n`, `_np`),
+			// and cannot match `!`-prefixed names. We reconstruct the full name here.
+			$name = $this->resolveTagFunctionName($nameToken, $phpTokens);
+
+			if ($name === null || !in_array($name, $functions, true)) {
+				continue;
+			}
+
+			// TagParser requires a Token::End sentinel at the end
+			$endPosition = !empty($phpTokens) ? end($phpTokens)->position : $tagOpenPosition;
+			$phpTokens[] = new Token(Token::End, '', $endPosition);
+
 			try {
-				$stmts = $phpParser->parse("<?php\nf($value);");
-			} catch (PhpParser\Error) {
+				$args = (new TagParser($phpTokens))->parseArguments();
+			} catch (Throwable) {
 				continue;
 			}
 
-			if ($stmts === null) {
-				continue;
-			}
-			if ($stmts[0] instanceof Expression && $stmts[0]->expr instanceof FuncCall) {
-				foreach ($this->functions[$name] as $definition) {
-					$message = $this->processFunction($definition, $stmts[0]->expr);
-					if ($message !== []) {
-						$message[Extractor::LINE] = $token['line'];
-						$data[] = $message;
-					}
+			foreach ($this->functions[$name] as $definition) {
+				$message = $this->processFunction($definition, $args);
+				if ($message !== []) {
+					$data[] = [Extractor::LINE => $line] + $message;
 				}
 			}
 		}
+
 		return $data;
 	}
 
 	/**
-	 * Scans Latte template source and returns all tag tokens as arrays:
-	 *   - text:  full tag including braces, e.g. {_'Hello'}
-	 *   - value: content inside braces,     e.g. _'Hello'
-	 *   - line:  1-based line number of the opening brace
+	 * Determines the logical function name from the tag name token and PHP-kind token list.
 	 *
-	 * Works with both Latte 2 and Latte 3 — does not rely on Latte internals.
+	 * Latte 3's TemplateLexer only produces Latte_Name='_' for {_p...}, {_n...}, {_np...}
+	 * and cannot produce a Latte_Name at all for {!_...}, {!custom...} tags.
 	 *
-	 * @return list<array{text: string, value: string, line: int}>
+	 * @param Token[] $phpTokens Modified in-place to strip consumed prefix tokens.
 	 */
-	private function scanLatteTags(string $content): array {
-		$tokens = [];
-		$len = strlen($content);
-		$i = 0;
-		$line = 1;
+	private function resolveTagFunctionName(?Token $nameToken, array &$phpTokens): ?string {
+		if ($nameToken !== null) {
+			$name = $nameToken->text;
 
-		while ($i < $len) {
-			$char = $content[$i];
-
-			if ($char === "\n") {
-				$line++;
-				$i++;
-				continue;
-			}
-
-			// Skip anything that is not a Latte tag opening:
-			//   {{ ... }}  — JS/double-brace literal
-			//   {* ... *}  — Latte comment
-			if ($char !== '{' || ($i + 1 < $len && ($content[$i + 1] === '{' || $content[$i + 1] === '*'))) {
-				$i++;
-				continue;
-			}
-
-			$startLine = $line;
-			$depth = 1;
-			$j = $i + 1;
-			$inString = false;
-			$stringChar = '';
-
-			while ($j < $len && $depth > 0) {
-				$c = $content[$j];
-
-				if ($c === "\n") {
-					$line++;
+			// Detect _p / _n / _np: {_p'ctx','msg'} tokenizes as Latte_Name='_' + bare identifier 'p'
+			if ($name === '_') {
+				foreach ($phpTokens as $i => $phpToken) {
+					if (trim($phpToken->text) === '') {
+						continue; // skip whitespace
+					}
+					if (in_array($phpToken->text, ['p', 'n', 'np'], true)) {
+						$name .= $phpToken->text;
+						array_splice($phpTokens, $i, 1);
+					}
+					break;
 				}
-
-				if ($inString) {
-					if ($c === '\\' && $j + 1 < $len) {
-						// escaped character inside string — skip next char
-						$j += 2;
-						continue;
-					}
-					if ($c === $stringChar) {
-						$inString = false;
-					}
-				} else {
-					if ($c === '"' || $c === "'") {
-						$inString = true;
-						$stringChar = $c;
-					} elseif ($c === '{') {
-						$depth++;
-					} elseif ($c === '}') {
-						$depth--;
-					}
-				}
-				$j++;
 			}
 
-			if ($depth === 0) {
-				$tokens[] = [
-					'text'  => substr($content, $i, $j - $i),
-					'value' => substr($content, $i + 1, $j - $i - 2),
-					'line'  => $startLine,
-				];
-			}
-
-			$i = $j;
+			return $name;
 		}
 
-		return $tokens;
+		// No Latte_Name token: detect {!_'msg'}, {!custom 'msg'}, {!_p'ctx','msg'} etc.
+		// phpTokens starts with [Token('!'), Token(identifier), ...]
+		if (count($phpTokens) >= 2 && $phpTokens[0]->text === '!') {
+			$identifier = $phpTokens[1]->text;
+			if (preg_match('/^[_a-z][_a-z0-9]*$/i', $identifier)) {
+				$name = '!' . $identifier;
+				array_splice($phpTokens, 0, 2);
+				return $name;
+			}
+		}
+
+		return null;
 	}
 
-	private function processFunction(array $definition, FuncCall $node): array {
+	private function processFunction(array $definition, ArrayNode $args): array {
 		$message = [];
 		foreach ($definition as $type => $position) {
-			if (!isset($node->args[$position - 1])) {
+			$item = $args->items[$position - 1] ?? null;
+			if ($item === null) {
 				return [];
 			}
-			$arg = $node->args[$position - 1]->value;
-			if ($arg instanceof String_) {
-				$message[$type] = $arg->value;
+			if ($item->value instanceof StringNode) {
+				$message[$type] = $item->value->value;
 			} else {
 				return [];
 			}
 		}
 		return $message;
-	}
-
-	private function findMacroName(string $text, array $functions): ?string {
-		foreach ($functions as $function) {
-			if (strpos($text, '{'.$function) === 0) {
-				return $function;
-			}
-		}
-		return null;
-	}
-
-	private function trimMacroValue(string $name, string $value): string {
-		// Strip the full function name from the value so the parser receives
-		// only the arguments, e.g. {_p'ctx','text'} → 'ctx','text'
-		//                          {translate'text'} → 'text'
-		return trim(substr($value, strlen($name)));
 	}
 }
