@@ -38,7 +38,7 @@ class PHPFilter extends AFilter implements IFilter, PhpParser\NodeVisitor {
 
 	public function extract(string $file): array {
 		$this->data = array();
-		$parser = (new PhpParser\ParserFactory())->create(PhpParser\ParserFactory::PREFER_PHP7);
+		$parser = (new PhpParser\ParserFactory())->createForNewestSupportedVersion();
 		$stmts = $parser->parse(FileSystem::read($file));
 		if ($stmts === null) {
 			return [];
@@ -58,8 +58,7 @@ class PHPFilter extends AFilter implements IFilter, PhpParser\NodeVisitor {
 			$name = $node->name->name;
 			$args = $node->args;
 		} elseif ($node instanceof FuncCall && $node->name instanceof Name) {
-			$parts = $node->name->parts;
-			$name = array_pop($parts);
+			$name = $node->name->toString();
 			$args = $node->args;
 		} else {
 			return null;
