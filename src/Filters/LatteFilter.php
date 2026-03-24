@@ -8,104 +8,155 @@ declare(strict_types=1);
 
 namespace Vodacek\GettextExtractor\Filters;
 
+use Latte\CompileException;
+use Latte\Compiler\Nodes\Php\Expression\ArrayNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\TagParser;
+use Latte\Compiler\TemplateLexer;
+use Latte\Compiler\Token;
 use Nette\Utils\FileSystem;
-use PhpParser\Node\Expr\FuncCall;
-use PhpParser\Node\Scalar\String_;
-use PhpParser\Node\Stmt\Expression;
+use Throwable;
 use Vodacek\GettextExtractor\Extractor;
-use PhpParser;
-use Latte;
 
 class LatteFilter extends AFilter implements IFilter {
 
-	public function __construct() {
-		$this->addFunction('_');
-		$this->addFunction('!_');
-		$this->addFunction('_n', 1, 2);
-		$this->addFunction('!_n', 1, 2);
-		$this->addFunction('_p', 2, null, 1);
-		$this->addFunction('!_p', 2, null, 1);
-		$this->addFunction('_np', 2, 3, 1);
-		$this->addFunction('!_np', 2, 3, 1);
-	}
+    public function __construct() {
+        $this->addFunction('_');
+        $this->addFunction('!_');
+        $this->addFunction('_n', 1, 2);
+        $this->addFunction('!_n', 1, 2);
+        $this->addFunction('_p', 2, null, 1);
+        $this->addFunction('!_p', 2, null, 1);
+        $this->addFunction('_np', 2, 3, 1);
+        $this->addFunction('!_np', 2, 3, 1);
+    }
 
-	public function extract(string $file): array {
-		$data = array();
+    public function extract(string $file): array {
+        $data = [];
+        $functions = array_keys($this->functions);
 
-		$latteParser = new Latte\Parser();
-		$tokens = $latteParser->parse(FileSystem::read($file));
+        $lexer = new TemplateLexer();
+        try {
+            $generator = $lexer->tokenize(FileSystem::read($file));
+        } catch (CompileException) {
+            return [];
+        }
 
-		$functions = array_keys($this->functions);
-		usort($functions, static function(string $a, string $b) {
-			return strlen($b) <=> strlen($a);
-		});
+        foreach ($generator as $token) {
+            if ($token->type !== Token::Latte_TagOpen) {
+                continue;
+            }
 
-		$phpParser = (new PhpParser\ParserFactory())->createForNewestSupportedVersion();
-		foreach ($tokens as $token) {
-			if ($token->type !== Latte\Token::MACRO_TAG) {
-				continue;
-			}
+            $line = $token->position->line;
+            $tagOpenPosition = $token->position;
 
-			$name = $this->findMacroName($token->text, $functions);
-			if ($name === null) {
-				continue;
-			}
-			$value = $this->trimMacroValue($name, $token->value);
-			$stmts = $phpParser->parse("<?php\nf($value);");
+            // Switch lexer into tag mode so it emits PHP-kind tokens for the content
+            $lexer->pushState(TemplateLexer::StateLatteTag);
 
-			if ($stmts === null) {
-				continue;
-			}
-			if ($stmts[0] instanceof Expression && $stmts[0]->expr instanceof FuncCall) {
-				foreach ($this->functions[$name] as $definition) {
-					$message = $this->processFunction($definition, $stmts[0]->expr);
-					if ($message !== []) {
-						$message[Extractor::LINE] = $token->line;
-						$data[] = $message;
-					}
-				}
-			}
-		}
-		return $data;
-	}
+            $nameToken = null;
+            $phpTokens = [];
 
-	private function processFunction(array $definition, FuncCall $node): array {
-		$message = [];
-		foreach ($definition as $type => $position) {
-			if (!isset($node->args[$position - 1])) {
-				return [];
-			}
-			$arg = $node->args[$position - 1]->value;
-			if ($arg instanceof String_) {
-				$message[$type] = $arg->value;
-			} else {
-				return [];
-			}
-		}
-		return $message;
-	}
+            while ($generator->valid()) {
+                $tagToken = $generator->current();
+                if ($tagToken->type === Token::Latte_TagClose || $tagToken->type === Token::End) {
+                    break; // do NOT advance — outer foreach will call next() with StatePlain restored
+                }
+                $generator->next();
+                if ($tagToken->type === Token::Latte_Name) {
+                    $nameToken = $tagToken;
+                } elseif ($tagToken->isPhpKind()) {
+                    $phpTokens[] = $tagToken;
+                }
+            }
 
-	private function findMacroName(string $text, array $functions): ?string {
-		foreach ($functions as $function) {
-			if (strpos($text, '{'.$function) === 0) {
-				return $function;
-			}
-		}
-		return null;
-	}
+            $lexer->popState();
 
-	private function trimMacroValue(string $name, string $value): string {
-		if (strpos($name, '!') === 0) {
-			// exclamation mark is never removed
-			return trim(substr($value, strlen($name)));
-		}
+            // Determine the actual function name.
+            // Latte 3's tag name regex only matches single `_` (not `_p`, `_n`, `_np`),
+            // and cannot match `!`-prefixed names. We reconstruct the full name here.
+            $name = $this->resolveTagFunctionName($nameToken, $phpTokens);
 
-		if (strpos($name, '_') === 0) {
-			// only underscore is removed
-			$offset = strlen(ltrim($name, '_'));
-			return substr($value, $offset);
-		}
+            if ($name === null || !in_array($name, $functions, true)) {
+                continue;
+            }
 
-		return $value;
-	}
+            // TagParser requires a Token::End sentinel at the end
+            $endPosition = !empty($phpTokens) ? end($phpTokens)->position : $tagOpenPosition;
+            $phpTokens[] = new Token(Token::End, '', $endPosition);
+
+            try {
+                $args = (new TagParser($phpTokens))->parseArguments();
+            } catch (Throwable) {
+                continue;
+            }
+
+            foreach ($this->functions[$name] as $definition) {
+                $message = $this->processFunction($definition, $args);
+                if ($message !== []) {
+                    $data[] = [Extractor::LINE => $line] + $message;
+                }
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Determines the logical function name from the tag name token and PHP-kind token list.
+     *
+     * Latte 3's TemplateLexer only produces Latte_Name='_' for {_p...}, {_n...}, {_np...}
+     * and cannot produce a Latte_Name at all for {!_...}, {!custom...} tags.
+     *
+     * @param Token[] $phpTokens Modified in-place to strip consumed prefix tokens.
+     */
+    private function resolveTagFunctionName(?Token $nameToken, array &$phpTokens): ?string {
+        if ($nameToken !== null) {
+            $name = $nameToken->text;
+
+            // Detect _p / _n / _np: {_p'ctx','msg'} tokenizes as Latte_Name='_' + bare identifier 'p'
+            if ($name === '_') {
+                foreach ($phpTokens as $i => $phpToken) {
+                    if (trim($phpToken->text) === '') {
+                        continue; // skip whitespace
+                    }
+                    if (in_array($phpToken->text, ['p', 'n', 'np'], true)) {
+                        $name .= $phpToken->text;
+                        array_splice($phpTokens, $i, 1);
+                    }
+                    break;
+                }
+            }
+
+            return $name;
+        }
+
+        // No Latte_Name token: detect {!_'msg'}, {!custom 'msg'}, {!_p'ctx','msg'} etc.
+        // phpTokens starts with [Token('!'), Token(identifier), ...]
+        if (count($phpTokens) >= 2 && $phpTokens[0]->text === '!') {
+            $identifier = $phpTokens[1]->text;
+            if (preg_match('/^[_a-z][_a-z0-9]*$/i', $identifier)) {
+                $name = '!' . $identifier;
+                array_splice($phpTokens, 0, 2);
+                return $name;
+            }
+        }
+
+        return null;
+    }
+
+    private function processFunction(array $definition, ArrayNode $args): array {
+        $message = [];
+        foreach ($definition as $type => $position) {
+            $item = $args->items[$position - 1] ?? null;
+            if ($item === null) {
+                return [];
+            }
+            if ($item->value instanceof StringNode) {
+                $message[$type] = $item->value->value;
+            } else {
+                return [];
+            }
+        }
+        return $message;
+    }
 }
