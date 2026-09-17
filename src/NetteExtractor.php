@@ -33,11 +33,9 @@ class NetteExtractor extends Extractor {
 
 		$phpFilter->addFunction('translate');
 
-		$latteFilter = $this->getFilter('Latte');
-		assert($latteFilter instanceof LatteFilter);
-
-		$latteFilter->addFunction('!_')
-				->addFunction('_');
+		// Note: `_` and `!_` are registered by LatteFilter::__construct(). Do not add them here
+		// (a second call to addFunction() would append a duplicate definition and Path 1 would
+		// then emit each hit twice for the shorthand tag form `{_'msg'}`).
 	}
 
 	/**

@@ -9,7 +9,14 @@ declare(strict_types=1);
 namespace Vodacek\GettextExtractor\Filters;
 
 use Latte\CompileException;
-use Latte\Compiler\Nodes\Php\Expression\ArrayNode;
+use Latte\Compiler\Node;
+use Latte\Compiler\Nodes\Php\ArgumentNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Expression\FunctionCallNode;
+use Latte\Compiler\Nodes\Php\Expression\MethodCallNode;
+use Latte\Compiler\Nodes\Php\Expression\StaticMethodCallNode;
+use Latte\Compiler\Nodes\Php\IdentifierNode;
+use Latte\Compiler\Nodes\Php\NameNode;
 use Latte\Compiler\Nodes\Php\Scalar\StringNode;
 use Latte\Compiler\TagParser;
 use Latte\Compiler\TemplateLexer;
@@ -71,17 +78,17 @@ class LatteFilter extends AFilter implements IFilter {
 
 			$lexer->popState();
 
-			// Determine the actual function name.
+			// Determine the actual function name for the tag-name path.
 			// Latte 3's tag name regex only matches single `_` (not `_p`, `_n`, `_np`),
 			// and cannot match `!`-prefixed names. We reconstruct the full name here.
 			$name = $this->resolveTagFunctionName($nameToken, $phpTokens);
 
-			if ($name === null || !in_array($name, $functions, true)) {
+			if ($phpTokens === [] && $name === null) {
 				continue;
 			}
 
 			// TagParser requires a Token::End sentinel at the end
-			$endPosition = !empty($phpTokens) ? end($phpTokens)->position : $tagOpenPosition;
+			$endPosition = $phpTokens !== [] ? end($phpTokens)->position : $tagOpenPosition;
 			$phpTokens[] = new Token(Token::End, '', $endPosition);
 
 			try {
@@ -90,12 +97,25 @@ class LatteFilter extends AFilter implements IFilter {
 				continue;
 			}
 
-			foreach ($this->functions[$name] as $definition) {
-				$message = $this->processFunction($definition, $args);
-				if ($message !== []) {
-					$data[] = [Extractor::LINE => $line] + $message;
+			// Path 1: the tag itself is a registered translation call — e.g. {_'msg'},
+			// {_p 'ctx', 'msg'}, {!_'msg'}. Args nodes are the call arguments directly.
+			if ($name !== null && in_array($name, $functions, true)) {
+				$values = [];
+				foreach ($args->items as $item) {
+					$values[] = $item->value;
+				}
+				foreach ($this->functions[$name] as $definition) {
+					$message = $this->processCall($definition, $values);
+					if ($message !== []) {
+						$data[] = [Extractor::LINE => $line] + $message;
+					}
 				}
 			}
+
+			// Path 2: walk every nested expression for inline calls — picks up
+			// {$translator->translate('msg')}, {tag attr => _('msg')},
+			// {tag attr => $translator->translate('msg')}, etc.
+			$this->collectFromNode($args, $functions, $line, $data);
 		}
 
 		return $data;
@@ -144,15 +164,55 @@ class LatteFilter extends AFilter implements IFilter {
 		return null;
 	}
 
-	private function processFunction(array $definition, ArrayNode $args): array {
+	/**
+	 * @param string[] $functions
+	 * @param array<int, array<string, mixed>> $data
+	 */
+	private function collectFromNode(Node $node, array $functions, int $line, array &$data): void {
+		$callName = null;
+		$callArgs = null;
+		if ($node instanceof FunctionCallNode && $node->name instanceof NameNode) {
+			$callName = $node->name->name;
+			$callArgs = $node->args;
+		} elseif ($node instanceof MethodCallNode && $node->name instanceof IdentifierNode) {
+			$callName = $node->name->name;
+			$callArgs = $node->args;
+		} elseif ($node instanceof StaticMethodCallNode && $node->name instanceof IdentifierNode) {
+			$callName = $node->name->name;
+			$callArgs = $node->args;
+		}
+
+		if ($callName !== null && in_array($callName, $functions, true)) {
+			$values = [];
+			foreach ($callArgs as $arg) {
+				$values[] = $arg instanceof ArgumentNode ? $arg->value : null;
+			}
+			foreach ($this->functions[$callName] as $definition) {
+				$message = $this->processCall($definition, $values);
+				if ($message !== []) {
+					$data[] = [Extractor::LINE => $line] + $message;
+				}
+			}
+		}
+
+		foreach ($node as $child) {
+			if ($child instanceof Node) {
+				$this->collectFromNode($child, $functions, $line, $data);
+			}
+		}
+	}
+
+	/**
+	 * @param array<string, int> $definition
+	 * @param array<int, ExpressionNode|null> $values
+	 * @return array<string, string>
+	 */
+	private function processCall(array $definition, array $values): array {
 		$message = [];
 		foreach ($definition as $type => $position) {
-			$item = $args->items[$position - 1] ?? null;
-			if ($item === null) {
-				return [];
-			}
-			if ($item->value instanceof StringNode) {
-				$message[$type] = $item->value->value;
+			$value = $values[$position - 1] ?? null;
+			if ($value instanceof StringNode) {
+				$message[$type] = $value->value;
 			} else {
 				return [];
 			}
