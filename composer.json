@@ -1,6 +1,5 @@
 {
 	"name": "voda/gettext-extractor",
-	"version": "v6.0.0",
 	"description": "tool for extracting gettext messages",
 	"authors": [
 		{"name": "Ondřej Vodáček", "email": "ondrej.vodacek@gmail.com"},
